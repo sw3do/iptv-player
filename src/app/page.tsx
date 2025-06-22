@@ -1,7 +1,8 @@
 'use client'
 
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
+import Image from 'next/image'
 import { 
   MagnifyingGlassIcon, 
   PlayIcon, 
@@ -22,8 +23,7 @@ import {
   fetchChannelsWithStreams, 
   searchChannels, 
   fetchCategories, 
-  fetchCountries,
-  getBestQualityStream 
+  fetchCountries
 } from '@/lib/api'
 import type { ChannelWithStream, Category, Country, FilterOptions } from '@/types/iptv'
 
@@ -45,7 +45,6 @@ const Home = () => {
   const [currentPage, setCurrentPage] = useState(1)
   const [isVideoLoading, setIsVideoLoading] = useState(false)
   const [retryCount, setRetryCount] = useState(0)
-  const [currentStreamIndex, setCurrentStreamIndex] = useState(0)
   const channelsPerPage = 12
   const maxRetries = 3
   
@@ -56,9 +55,21 @@ const Home = () => {
     loadInitialData()
   }, [])
 
+  const filterChannels = useCallback(async () => {
+    const filters: FilterOptions = {
+      search: searchTerm,
+      category: selectedCategory || undefined,
+      country: selectedCountry || undefined
+    }
+    
+    const filtered = await searchChannels(channels, filters)
+    setFilteredChannels(filtered)
+    setCurrentPage(1)
+  }, [channels, searchTerm, selectedCategory, selectedCountry])
+
   useEffect(() => {
     filterChannels()
-  }, [channels, searchTerm, selectedCategory, selectedCountry])
+  }, [filterChannels])
 
   useEffect(() => {
     return () => {
@@ -84,23 +95,11 @@ const Home = () => {
       if (channelsData.length > 0) {
         setCurrentChannel(channelsData[0])
       }
-    } catch (error) {
+    } catch {
       toast.error('Kanallar yüklenirken hata oluştu')
     } finally {
       setLoading(false)
     }
-  }
-
-  const filterChannels = async () => {
-    const filters: FilterOptions = {
-      search: searchTerm,
-      category: selectedCategory || undefined,
-      country: selectedCountry || undefined
-    }
-    
-    const filtered = await searchChannels(channels, filters)
-    setFilteredChannels(filtered)
-    setCurrentPage(1)
   }
 
   const cleanupVideo = () => {
@@ -129,7 +128,6 @@ const Home = () => {
     }
 
     const stream = channel.streams[startIndex]
-    setCurrentStreamIndex(startIndex)
     
     playStreamWithRetry(stream.url, () => {
       tryNextStream(channel, startIndex + 1)
@@ -272,7 +270,6 @@ const Home = () => {
 
     setCurrentChannel(channel)
     setRetryCount(0)
-    setCurrentStreamIndex(0)
     
     if (!channel.streams || channel.streams.length === 0) {
       toast.error('Bu kanal için stream bulunamadı')
@@ -545,10 +542,12 @@ const Home = () => {
                       >
                         <div className="flex items-center gap-3">
                           {channel.logo && (
-                            <img
+                            <Image
                               src={channel.logo}
                               alt={channel.name}
-                              className="w-10 h-10 rounded-lg object-cover"
+                              width={40}
+                              height={40}
+                              className="rounded-lg object-cover"
                               onError={(e) => {
                                 e.currentTarget.style.display = 'none'
                               }}
