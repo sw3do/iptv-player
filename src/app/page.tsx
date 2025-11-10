@@ -1,610 +1,256 @@
-'use client'
+"use client"
 
-import { useState, useEffect, useRef, useCallback } from 'react'
-import { motion, AnimatePresence } from 'framer-motion'
-import Image from 'next/image'
-import { 
-  MagnifyingGlassIcon, 
-  PlayIcon, 
-  PauseIcon,
-  SpeakerWaveIcon,
-  SpeakerXMarkIcon,
-  ArrowsPointingOutIcon,
-  ChevronLeftIcon,
-  ChevronRightIcon,
-  HeartIcon,
-  ShareIcon,
-  AdjustmentsHorizontalIcon
-} from '@heroicons/react/24/outline'
-import { HeartIcon as HeartSolidIcon } from '@heroicons/react/24/solid'
-import toast, { Toaster } from 'react-hot-toast'
-import Hls from 'hls.js'
-import { 
-  fetchChannelsWithStreams, 
-  searchChannels, 
-  fetchCategories, 
-  fetchCountries
-} from '@/lib/api'
-import type { ChannelWithStream, Category, Country, FilterOptions } from '@/types/iptv'
+import { useState, useEffect, useMemo, useCallback, Suspense, lazy, useTransition } from "react"
+import { AnimatePresence } from "framer-motion"
+import { Toaster } from "react-hot-toast"
+import toast from "react-hot-toast"
+import { fetchChannelsProgressively, fetchCategories, fetchCountries } from "@/lib/api"
+import type { ChannelWithStream, Category, Country } from "@/types/iptv"
 
-const Home = () => {
+const VideoPlayer = lazy(() => import("@/components/VideoPlayer").then((m) => ({ default: m.VideoPlayer })))
+const ChannelList = lazy(() => import("@/components/ChannelList").then((m) => ({ default: m.ChannelList })))
+const FilterPanel = lazy(() => import("@/components/FilterPanel").then((m) => ({ default: m.FilterPanel })))
+const ChannelInfo = lazy(() => import("@/components/ChannelInfo").then((m) => ({ default: m.ChannelInfo })))
+
+export default function Page() {
   const [channels, setChannels] = useState<ChannelWithStream[]>([])
-  const [filteredChannels, setFilteredChannels] = useState<ChannelWithStream[]>([])
   const [categories, setCategories] = useState<Category[]>([])
   const [countries, setCountries] = useState<Country[]>([])
-  const [loading, setLoading] = useState(true)
-  const [searchTerm, setSearchTerm] = useState('')
-  const [selectedCategory, setSelectedCategory] = useState('')
-  const [selectedCountry, setSelectedCountry] = useState('')
+  const [loadingProgress, setLoadingProgress] = useState(0)
+  const [isInitialLoad, setIsInitialLoad] = useState(true)
+  const [isPending, startTransition] = useTransition()
+
+  const [searchInput, setSearchInput] = useState("")
+  const [searchTerm, setSearchTerm] = useState("")
+  const [selectedCategory, setSelectedCategory] = useState("")
+  const [selectedCountry, setSelectedCountry] = useState("")
+
   const [currentChannel, setCurrentChannel] = useState<ChannelWithStream | null>(null)
-  const [isPlaying, setIsPlaying] = useState(false)
-  const [isMuted, setIsMuted] = useState(false)
-  const [volume, setVolume] = useState(0.8)
-  const [favorites, setFavorites] = useState<string[]>([])
-  const [showFilters, setShowFilters] = useState(false)
-  const [currentPage, setCurrentPage] = useState(1)
+  const [currentStreamUrl, setCurrentStreamUrl] = useState<string | null>(null)
+  const [streamIndex, setStreamIndex] = useState(0)
   const [isVideoLoading, setIsVideoLoading] = useState(false)
-  const [retryCount, setRetryCount] = useState(0)
-  const channelsPerPage = 12
-  const maxRetries = 3
-  
-  const videoRef = useRef<HTMLVideoElement>(null)
-  const hlsRef = useRef<Hls | null>(null)
+  const [hlsError, setHlsError] = useState<string | null>(null)
+  const [favorites, setFavorites] = useState<string[]>([])
+
+  const [showFilters, setShowFilters] = useState(false)
 
   useEffect(() => {
-    loadInitialData()
+    let mounted = true
+    let hasSetInitialChannel = false
+    
+    const load = async () => {
+      try {
+        setIsInitialLoad(true)
+        
+        const [cats, cnts] = await Promise.all([
+          fetchCategories(),
+          fetchCountries(),
+        ])
+        
+        if (!mounted) return
+        setCategories(cats)
+        setCountries(cnts)
+
+          await fetchChannelsProgressively((progressiveChannels, progress) => {
+          if (!mounted) return
+          
+          startTransition(() => {
+            setChannels(progressiveChannels)
+            setLoadingProgress(progress)
+          })
+
+          if (progress >= 20 && progressiveChannels.length > 0 && !hasSetInitialChannel) {
+            hasSetInitialChannel = true
+            setCurrentChannel(progressiveChannels[0])
+            setCurrentStreamUrl(progressiveChannels[0].streams?.[0]?.url ?? null)
+            setStreamIndex(0)
+          }
+        })
+
+        if (mounted) {
+          setIsInitialLoad(false)
+        }
+      } catch (e) {
+        console.error(e)
+        toast.error("Kanallar yüklenemedi")
+        setIsInitialLoad(false)
+      }
+    }
+    load()
+
+    const saved = localStorage.getItem("iptv_favs_v2")
+    if (saved) {
+      try {
+        setFavorites(JSON.parse(saved))
+      } catch {}
+    }
+
+    return () => {
+      mounted = false
+    }
   }, [])
 
-  const filterChannels = useCallback(async () => {
-    const filters: FilterOptions = {
-      search: searchTerm,
-      category: selectedCategory || undefined,
-      country: selectedCountry || undefined
+  useEffect(() => {
+    localStorage.setItem("iptv_favs_v2", JSON.stringify(favorites))
+  }, [favorites])
+
+  useEffect(() => {
+    const t = setTimeout(() => setSearchTerm(searchInput), 250)
+    return () => clearTimeout(t)
+  }, [searchInput])
+
+  const filteredChannels = useMemo(() => {
+    let r = channels
+    if (searchTerm) {
+      const s = searchTerm.toLowerCase()
+      r = r.filter((c) => c.name.toLowerCase().includes(s) || c.country.toLowerCase().includes(s) || c.categories.some((x) => x.toLowerCase().includes(s)))
     }
-    
-    const filtered = await searchChannels(channels, filters)
-    setFilteredChannels(filtered)
-    setCurrentPage(1)
+    if (selectedCategory) r = r.filter((c) => c.categories.includes(selectedCategory))
+    if (selectedCountry) r = r.filter((c) => c.country === selectedCountry)
+    return r
   }, [channels, searchTerm, selectedCategory, selectedCountry])
 
-  useEffect(() => {
-    filterChannels()
-  }, [filterChannels])
-
-  useEffect(() => {
-    return () => {
-      if (hlsRef.current) {
-        hlsRef.current.destroy()
-      }
+  const setChannelAndPlay = useCallback((ch: ChannelWithStream, startIdx = 0) => {
+    if (!ch) return
+    if (!ch.streams || ch.streams.length === 0) {
+      toast.error("Stream bulunamadı")
+      return
     }
+    setCurrentChannel(ch)
+    setStreamIndex(startIdx)
+    setCurrentStreamUrl(ch.streams[startIdx]?.url ?? null)
+    setIsVideoLoading(true)
+    setHlsError(null)
   }, [])
 
-  const loadInitialData = async () => {
-    try {
-      setLoading(true)
-      const [channelsData, categoriesData, countriesData] = await Promise.all([
-        fetchChannelsWithStreams(),
-        fetchCategories(),
-        fetchCountries()
-      ])
-      
-      setChannels(channelsData)
-      setCategories(categoriesData)
-      setCountries(countriesData)
-      
-      if (channelsData.length > 0) {
-        setCurrentChannel(channelsData[0])
-      }
-    } catch {
-      toast.error('Kanallar yüklenirken hata oluştu')
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  const cleanupVideo = () => {
-    if (hlsRef.current) {
-      hlsRef.current.destroy()
-      hlsRef.current = null
-    }
-    if (videoRef.current) {
-      videoRef.current.src = ''
-    }
-    setIsPlaying(false)
-    setIsVideoLoading(false)
-  }
-
-  const tryNextStream = (channel: ChannelWithStream, startIndex: number = 0) => {
-    if (!channel.streams || channel.streams.length === 0) {
-      toast.error('Bu kanal için uygun stream bulunamadı')
-      setIsVideoLoading(false)
-      return
-    }
-
-    if (startIndex >= channel.streams.length) {
-      toast.error('Tüm streamler denendi, kanal oynatılamadı')
-      setIsVideoLoading(false)
-      return
-    }
-
-    const stream = channel.streams[startIndex]
-    
-    playStreamWithRetry(stream.url, () => {
-      tryNextStream(channel, startIndex + 1)
-    })
-  }
-
-  const playStreamWithRetry = (streamUrl: string, onFallback: () => void) => {
-    if (!videoRef.current) return
-
-    cleanupVideo()
-    setIsVideoLoading(true)
-
-    const video = videoRef.current
-
-    const handleVideoError = () => {
-      console.error('Video oynatma hatası:', streamUrl)
-      if (retryCount < maxRetries) {
-        setRetryCount(prev => prev + 1)
-        setTimeout(() => {
-          playStreamWithRetry(streamUrl, onFallback)
-        }, 1000)
-      } else {
-        setRetryCount(0)
-        onFallback()
-      }
-    }
-
-    const handleVideoCanPlay = () => {
-      setIsVideoLoading(false)
-      video.play().then(() => {
-        setIsPlaying(true)
-        setRetryCount(0)
-      }).catch(handleVideoError)
-    }
-
-    const handleVideoWaiting = () => {
+  const handleVideoError = useCallback(() => {
+    // Try next stream for current channel, otherwise show error UI
+    if (!currentChannel) return
+    const next = (streamIndex ?? 0) + 1
+    if (currentChannel.streams && next < currentChannel.streams.length) {
+      setStreamIndex(next)
+      setCurrentStreamUrl(currentChannel.streams[next].url)
+      toast(`Deniyor: ${next + 1}/${currentChannel.streams.length}`)
       setIsVideoLoading(true)
-    }
-
-    const handleVideoPlaying = () => {
-      setIsVideoLoading(false)
-      setIsPlaying(true)
-    }
-
-    const cleanupEventListeners = () => {
-      video.removeEventListener('error', handleVideoError)
-      video.removeEventListener('canplay', handleVideoCanPlay)
-      video.removeEventListener('waiting', handleVideoWaiting)
-      video.removeEventListener('playing', handleVideoPlaying)
-      video.removeEventListener('stalled', handleVideoWaiting)
-    }
-
-    video.addEventListener('error', handleVideoError)
-    video.addEventListener('canplay', handleVideoCanPlay)
-    video.addEventListener('waiting', handleVideoWaiting)
-    video.addEventListener('playing', handleVideoPlaying)
-    video.addEventListener('stalled', handleVideoWaiting)
-    
-    video.addEventListener('loadstart', cleanupEventListeners, { once: true })
-
-    if (Hls.isSupported()) {
-      const hls = new Hls({
-        enableWorker: false,
-        lowLatencyMode: true,
-        backBufferLength: 90,
-        maxBufferLength: 30,
-        maxMaxBufferLength: 600,
-        startLevel: -1,
-        capLevelToPlayerSize: true,
-        debug: false
-      })
-      
-      hlsRef.current = hls
-      
-      hls.on(Hls.Events.MANIFEST_PARSED, () => {
-        handleVideoCanPlay()
-      })
-      
-      hls.on(Hls.Events.ERROR, (event, data) => {
-        console.error('HLS Error:', data)
-        
-        if (data.fatal) {
-          switch(data.type) {
-            case Hls.ErrorTypes.NETWORK_ERROR:
-              if (retryCount < maxRetries) {
-                toast.error(`Ağ hatası, tekrar deneniyor... (${retryCount + 1}/${maxRetries})`)
-                setRetryCount(prev => prev + 1)
-                setTimeout(() => {
-                  hls.startLoad()
-                }, 1000)
-              } else {
-                toast.error('Ağ bağlantısı hatası')
-                setRetryCount(0)
-                onFallback()
-              }
-              break
-            case Hls.ErrorTypes.MEDIA_ERROR:
-              if (retryCount < maxRetries) {
-                toast.error(`Medya hatası, tekrar deneniyor... (${retryCount + 1}/${maxRetries})`)
-                setRetryCount(prev => prev + 1)
-                setTimeout(() => {
-                  hls.recoverMediaError()
-                }, 1000)
-              } else {
-                toast.error('Medya oynatma hatası')
-                setRetryCount(0)
-                onFallback()
-              }
-              break
-            default:
-              toast.error('Stream hatası: ' + data.details)
-              onFallback()
-              break
-          }
-        }
-      })
-      
-      hls.on(Hls.Events.BUFFER_APPENDING, () => {
-        setIsVideoLoading(true)
-      })
-      
-      hls.on(Hls.Events.BUFFER_APPENDED, () => {
-        setIsVideoLoading(false)
-      })
-
-      hls.loadSource(streamUrl)
-      hls.attachMedia(video)
-      
-    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-      video.src = streamUrl
-      video.load()
+      setHlsError(null)
     } else {
-      toast.error('Bu tarayıcı HLS formatını desteklemiyor')
+      setHlsError("Oynatma hatası oluştu. Alternatif kaynak bulunamadı.")
       setIsVideoLoading(false)
     }
-  }
+  }, [currentChannel, streamIndex])
 
-  const playChannel = (channel: ChannelWithStream) => {
-    if (!videoRef.current) return
+  const handleRetry = useCallback((idx = 0) => {
+    if (!currentChannel) return
+    const i = idx < currentChannel.streams.length ? idx : 0
+    setStreamIndex(i)
+    setCurrentStreamUrl(currentChannel.streams[i].url)
+    setHlsError(null)
+    setIsVideoLoading(true)
+  }, [currentChannel])
 
-    setCurrentChannel(channel)
-    setRetryCount(0)
-    
-    if (!channel.streams || channel.streams.length === 0) {
-      toast.error('Bu kanal için stream bulunamadı')
-      return
-    }
-
-    tryNextStream(channel, 0)
-  }
-
-  const togglePlayPause = () => {
-    if (!videoRef.current) return
-    
-    if (isPlaying) {
-      videoRef.current.pause()
-      setIsPlaying(false)
-    } else {
-      videoRef.current.play().then(() => {
-        setIsPlaying(true)
-      }).catch(() => {
-        toast.error('Video oynatılamadı')
-      })
-    }
-  }
-
-  const toggleMute = () => {
-    if (!videoRef.current) return
-    
-    videoRef.current.muted = !isMuted
-    setIsMuted(!isMuted)
-  }
-
-  const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const newVolume = parseFloat(e.target.value)
-    setVolume(newVolume)
-    if (videoRef.current) {
-      videoRef.current.volume = newVolume
-    }
-  }
-
-  const toggleFavorite = (channelId: string) => {
-    setFavorites(prev => 
-      prev.includes(channelId) 
-        ? prev.filter(id => id !== channelId)
-        : [...prev, channelId]
-    )
-  }
-
-  const totalPages = Math.ceil(filteredChannels.length / channelsPerPage)
-  const startIndex = (currentPage - 1) * channelsPerPage
-  const currentChannels = filteredChannels.slice(startIndex, startIndex + channelsPerPage)
+  const toggleFavorite = useCallback((id: string) => {
+    setFavorites((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
+  }, [])
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-blue-900 to-indigo-900">
+    <div className="min-h-screen w-full relative">
+      <div className="fixed inset-0 bg-gradient-to-br from-[#9400D3] to-[#4B0082] -z-20" />
+      <div className="fixed inset-0 bg-gradient-to-b from-transparent via-black/30 to-black -z-10" />
+
       <Toaster position="top-right" />
-      
-      <header className="sticky top-0 z-50 glass-dark border-b border-white/10">
-        <div className="max-w-7xl mx-auto px-4 py-4">
-          <div className="flex items-center justify-between">
-            <motion.h1 
-              initial={{ opacity: 0, x: -20 }}
-              animate={{ opacity: 1, x: 0 }}
-              className="text-3xl font-bold bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent"
-            >
-              IPTV Player
-            </motion.h1>
-            
-            <div className="flex items-center gap-4">
-              <motion.button
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
-                onClick={() => setShowFilters(!showFilters)}
-                className="p-2 glass rounded-lg hover:bg-white/20 transition-colors"
-              >
-                <AdjustmentsHorizontalIcon className="w-5 h-5" />
-              </motion.button>
-            </div>
-          </div>
-        </div>
-      </header>
 
-      <AnimatePresence>
-        {showFilters && (
-          <motion.div
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: 'auto' }}
-            exit={{ opacity: 0, height: 0 }}
-            className="glass-dark border-b border-white/10 overflow-hidden"
-          >
-            <div className="max-w-7xl mx-auto px-4 py-4">
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <div className="relative">
-                  <MagnifyingGlassIcon className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" />
-                  <input
-                    type="text"
-                    placeholder="Search channels..."
-                    value={searchTerm}
-                    onChange={(e) => setSearchTerm(e.target.value)}
-                    className="w-full pl-10 pr-4 py-2 glass rounded-lg border border-white/20 focus:border-blue-400 focus:outline-none text-white placeholder-gray-400"
-                  />
-                </div>
-                
-                <select
-                  value={selectedCategory}
-                  onChange={(e) => setSelectedCategory(e.target.value)}
-                  className="px-4 py-2 glass rounded-lg border border-white/20 focus:border-blue-400 focus:outline-none text-white bg-transparent"
-                >
-                  <option value="">All Categories</option>
-                  {categories.map(category => (
-                    <option key={category.id} value={category.id} className="bg-slate-800">
-                      {category.name}
-                    </option>
-                  ))}
-                </select>
-                
-                <select
-                  value={selectedCountry}
-                  onChange={(e) => setSelectedCountry(e.target.value)}
-                  className="px-4 py-2 glass rounded-lg border border-white/20 focus:border-blue-400 focus:outline-none text-white bg-transparent"
-                >
-                  <option value="">All Countries</option>
-                  {countries.map(country => (
-                    <option key={country.code} value={country.code} className="bg-slate-800">
-                      {country.name}
-                    </option>
-                  ))}
-                </select>
+      {isInitialLoad && loadingProgress < 100 && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm">
+          <div className="glass-dark p-8 rounded-2xl max-w-md w-full mx-4">
+            <div className="text-center space-y-4">
+              <div className="loading-spinner mx-auto" />
+              <div className="space-y-2">
+                <h3 className="text-lg font-semibold text-white">Kanallar yükleniyor...</h3>
+                <p className="text-sm text-gray-400">{channels.length} kanal yüklendi</p>
               </div>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      <div className="max-w-7xl mx-auto px-4 py-6">
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          
-          <div className="lg:col-span-2">
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="glass rounded-xl overflow-hidden"
-            >
-              <div className="aspect-video bg-black relative">
-                <video
-                  ref={videoRef}
-                  className="w-full h-full object-contain"
-                  controls={false}
-                  onPlay={() => setIsPlaying(true)}
-                  onPause={() => setIsPlaying(false)}
+              <div className="w-full bg-white/10 rounded-full h-2 overflow-hidden">
+                <div 
+                  className="h-full bg-gradient-to-r from-purple-500 to-pink-500 transition-all duration-300"
+                  style={{ width: `${loadingProgress}%` }}
                 />
-                
-                {isVideoLoading && (
-                  <div className="absolute inset-0 bg-black/50 flex items-center justify-center">
-                    <div className="flex flex-col items-center gap-3">
-                      <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-400"></div>
-                      <p className="text-white text-sm">Yükleniyor...</p>
-                      {retryCount > 0 && (
-                        <p className="text-gray-400 text-xs">Deneme {retryCount}/{maxRetries}</p>
-                      )}
-                    </div>
-                  </div>
-                )}
-                
-                <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent opacity-0 hover:opacity-100 transition-opacity duration-300">
-                  <div className="absolute bottom-0 left-0 right-0 p-4">
-                    <div className="flex items-center gap-4">
-                      <button
-                        onClick={togglePlayPause}
-                        className="p-2 bg-white/20 rounded-full hover:bg-white/30 transition-colors"
-                      >
-                        {isPlaying ? (
-                          <PauseIcon className="w-6 h-6" />
-                        ) : (
-                          <PlayIcon className="w-6 h-6" />
-                        )}
-                      </button>
-                      
-                      <button
-                        onClick={toggleMute}
-                        className="p-2 bg-white/20 rounded-full hover:bg-white/30 transition-colors"
-                      >
-                        {isMuted ? (
-                          <SpeakerXMarkIcon className="w-5 h-5" />
-                        ) : (
-                          <SpeakerWaveIcon className="w-5 h-5" />
-                        )}
-                      </button>
-                      
-                      <input
-                        type="range"
-                        min="0"
-                        max="1"
-                        step="0.1"
-                        value={volume}
-                        onChange={handleVolumeChange}
-                        className="w-20 accent-blue-400"
-                      />
-                      
-                      <div className="flex-1" />
-                      
-                      <button className="p-2 bg-white/20 rounded-full hover:bg-white/30 transition-colors">
-                        <ArrowsPointingOutIcon className="w-5 h-5" />
-                      </button>
-                    </div>
-                  </div>
-                </div>
               </div>
-              
-              {currentChannel && (
-                <div className="p-4 border-t border-white/10">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <h3 className="text-xl font-semibold text-white">
-                        {currentChannel.name}
-                      </h3>
-                      <p className="text-gray-400 text-sm mt-1">
-                        {currentChannel.categories.join(', ')} • {currentChannel.country}
-                      </p>
-                    </div>
-                    
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={() => toggleFavorite(currentChannel.id)}
-                        className="p-2 hover:bg-white/10 rounded-lg transition-colors"
-                      >
-                        {favorites.includes(currentChannel.id) ? (
-                          <HeartSolidIcon className="w-5 h-5 text-red-400" />
-                        ) : (
-                          <HeartIcon className="w-5 h-5" />
-                        )}
-                      </button>
-                      <button className="p-2 hover:bg-white/10 rounded-lg transition-colors">
-                        <ShareIcon className="w-5 h-5" />
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              )}
-            </motion.div>
-          </div>
-
-          <div className="lg:col-span-1">
-            <motion.div
-              initial={{ opacity: 0, x: 20 }}
-              animate={{ opacity: 1, x: 0 }}
-              className="glass rounded-xl h-[600px] flex flex-col"
-            >
-              <div className="p-4 border-b border-white/10">
-                <h2 className="text-lg font-semibold text-white">
-                  Channels ({filteredChannels.length})
-                </h2>
-              </div>
-              
-              <div className="flex-1 overflow-y-auto">
-                {loading ? (
-                  <div className="flex items-center justify-center h-full">
-                    <div className="loading-dots text-gray-400">Loading</div>
-                  </div>
-                ) : (
-                  <div className="space-y-2 p-2">
-                    {currentChannels.map((channel, index) => (
-                      <motion.div
-                        key={channel.id}
-                        initial={{ opacity: 0, y: 20 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        transition={{ delay: index * 0.05 }}
-                        onClick={() => playChannel(channel)}
-                        className={`p-3 rounded-lg cursor-pointer transition-all duration-200 hover:bg-white/10 ${
-                          currentChannel?.id === channel.id ? 'bg-blue-500/20 border border-blue-400' : 'hover:bg-white/5'
-                        }`}
-                      >
-                        <div className="flex items-center gap-3">
-                          {channel.logo && (
-                            <Image
-                              src={channel.logo}
-                              alt={channel.name}
-                              width={40}
-                              height={40}
-                              className="rounded-lg object-cover"
-                              onError={(e) => {
-                                e.currentTarget.style.display = 'none'
-                              }}
-                            />
-                          )}
-                          <div className="flex-1 min-w-0">
-                            <h3 className="text-sm font-medium text-white truncate">
-                              {channel.name}
-                            </h3>
-                            <p className="text-xs text-gray-400 truncate">
-                              {channel.country} • {channel.streams.length} stream
-                              {currentChannel?.id === channel.id && isVideoLoading && (
-                                <span className="ml-2 text-blue-400">• Yükleniyor...</span>
-                              )}
-                            </p>
-                          </div>
-                          {favorites.includes(channel.id) && (
-                            <HeartSolidIcon className="w-4 h-4 text-red-400 flex-shrink-0" />
-                          )}
-                        </div>
-                      </motion.div>
-                    ))}
-                  </div>
-                )}
-              </div>
-              
-              {totalPages > 1 && (
-                <div className="p-4 border-t border-white/10">
-                  <div className="flex items-center justify-between">
-                    <button
-                      onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
-                      disabled={currentPage === 1}
-                      className="p-2 glass rounded-lg hover:bg-white/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      <ChevronLeftIcon className="w-4 h-4" />
-                    </button>
-                    
-                    <span className="text-sm text-gray-400">
-                      {currentPage} / {totalPages}
-                    </span>
-                    
-                    <button
-                      onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
-                      disabled={currentPage === totalPages}
-                      className="p-2 glass rounded-lg hover:bg-white/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      <ChevronRightIcon className="w-4 h-4" />
-                    </button>
-                  </div>
-                </div>
-              )}
-            </motion.div>
+              <p className="text-xs text-gray-500">%{loadingProgress}</p>
+            </div>
           </div>
         </div>
-      </div>
+      )}
+
+      <main className="max-w-[2000px] mx-auto px-4 sm:px-6 lg:px-8 py-6">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+          <section className="lg:col-span-8 xl:col-span-9">
+            <div className="glass rounded-2xl overflow-hidden shadow-lg">
+              <Suspense fallback={<div className="aspect-video bg-black flex items-center justify-center"><div className="loading-spinner" /></div>}>
+                <VideoPlayer
+                  streamUrl={currentStreamUrl}
+                  channelName={currentChannel?.name ?? ""}
+                  onError={handleVideoError}
+                />
+              </Suspense>
+              {hlsError && (
+                <div className="p-4 bg-gradient-to-t from-black/80 to-transparent text-sm text-red-300">
+                  <div className="flex items-center justify-between gap-4">
+                    <div>{hlsError}</div>
+                    <div className="flex items-center gap-2">
+                      <button onClick={() => handleRetry(streamIndex)} className="px-3 py-1 rounded-md bg-purple-600/80">Tekrar dene</button>
+                      <button onClick={() => handleRetry(0)} className="px-3 py-1 rounded-md bg-white/5">Ana kaynağa dön</button>
+                    </div>
+                  </div>
+                  {currentChannel?.streams && (
+                    <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      {currentChannel.streams.map((s, i) => (
+                        <div key={i} className="flex items-center justify-between gap-2 bg-white/3 p-2 rounded">
+                          <div className="truncate text-xs">{s.quality ?? s.url}</div>
+                          <div className="flex items-center gap-2">
+                            <button onClick={() => handleRetry(i)} className="text-xs px-2 py-1 bg-purple-600/70 rounded">Use</button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+            {currentChannel && (
+              <Suspense fallback={<div className="h-24 glass mt-4" />}>
+                <ChannelInfo channel={currentChannel} isFavorite={favorites.includes(currentChannel.id)} onToggleFavorite={() => toggleFavorite(currentChannel.id)} />
+              </Suspense>
+            )}
+          </section>
+
+          <aside className="lg:col-span-4 xl:col-span-3">
+            <div className="glass rounded-2xl h-[70vh] overflow-hidden shadow-lg flex flex-col">
+              <div className="p-4 border-b border-white/5 flex items-center justify-between">
+                <div className="text-sm font-semibold">Channels</div>
+                <div className="flex items-center gap-2">
+                  {isPending && <div className="w-3 h-3 border-2 border-purple-500/30 border-t-purple-500 rounded-full animate-spin" />}
+                  <div className="text-xs text-gray-300">{filteredChannels.length}</div>
+                </div>
+              </div>
+              <div className="flex-1 overflow-hidden">
+                <Suspense fallback={<div className="p-6 flex items-center justify-center"><div className="loading-spinner" /></div>}>
+                  <ChannelList channels={filteredChannels} currentChannel={currentChannel} favorites={favorites} isLoading={isVideoLoading} onChannelClick={(c) => setChannelAndPlay(c, 0)} />
+                </Suspense>
+              </div>
+              <div className="p-3 border-t border-white/5 flex items-center gap-2">
+                <input value={searchInput} onChange={(e) => setSearchInput(e.target.value)} placeholder="Search" className="input-modern" />
+                <button onClick={() => setShowFilters((s) => !s)} className="p-2 bg-white/5 rounded">Filters</button>
+              </div>
+              <AnimatePresence>
+                {showFilters && (
+                  <Suspense fallback={<div className="p-4">Loading filters...</div>}>
+                    <FilterPanel searchInput={searchInput} selectedCategory={selectedCategory} selectedCountry={selectedCountry} categories={categories} countries={countries} onSearchChange={setSearchInput} onCategoryChange={setSelectedCategory} onCountryChange={setSelectedCountry} onClearAll={() => { setSearchInput(""); setSelectedCategory(""); setSelectedCountry("") }} />
+                  </Suspense>
+                )}
+              </AnimatePresence>
+            </div>
+          </aside>
+        </div>
+      </main>
     </div>
   )
 }
-
-export default Home

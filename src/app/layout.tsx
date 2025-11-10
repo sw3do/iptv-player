@@ -6,19 +6,26 @@ const inter = Inter({
   subsets: ['latin'],
   display: 'swap',
   variable: '--font-inter',
+  weight: ['300', '400', '500', '600', '700', '800', '900'],
 })
 
 export const metadata: Metadata = {
   title: 'IPTV Player - Watch Live TV Channels',
-  description: 'A modern IPTV player to watch live TV channels from around the world. Built with Next.js and Tailwind CSS.',
-  keywords: 'IPTV, Live TV, Streaming, Television, Channels, Player',
-  authors: [{ name: 'IPTV Player Team' }],
+  description: 'Modern IPTV player with stunning Revolut-inspired design. Watch thousands of live TV channels from around the world.',
+  keywords: 'IPTV, Live TV, Streaming, Television, Channels, Player, HLS, M3U8',
+  authors: [{ name: 'IPTV Player' }],
+  openGraph: {
+    title: 'IPTV Player',
+    description: 'Watch live TV channels with modern interface',
+    type: 'website',
+  },
 }
 
 export const viewport: Viewport = {
   width: 'device-width',
   initialScale: 1,
-  themeColor: '#1e293b',
+  maximumScale: 5,
+  themeColor: '#9400D3',
 }
 
 export default function RootLayout({
@@ -27,11 +34,9 @@ export default function RootLayout({
   children: React.ReactNode
 }) {
   return (
-    <html lang="en" className={inter.variable}>
-      <body className={`${inter.className} antialiased`}>
-        <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900">
-          {children}
-        </div>
+    <html lang="en" className={inter.variable} suppressHydrationWarning>
+      <body className={`${inter.className} antialiased min-h-screen`} suppressHydrationWarning>
+        {children}
       </body>
     </html>
   )

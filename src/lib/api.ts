@@ -119,6 +119,51 @@ export const fetchChannelsWithStreams = async (): Promise<ChannelWithStream[]> =
   }
 }
 
+export const fetchChannelsProgressively = async (
+  onProgress?: (channels: ChannelWithStream[], progress: number) => void
+): Promise<ChannelWithStream[]> => {
+  try {
+    const [channels, streams, feeds] = await Promise.all([
+      fetchChannels(),
+      fetchStreams(),
+      fetchFeeds()
+    ])
+
+    const BATCH_SIZE = 500
+    const allChannels: ChannelWithStream[] = []
+    const totalChannels = channels.length
+
+    for (let i = 0; i < channels.length; i += BATCH_SIZE) {
+      const batch = channels.slice(i, i + BATCH_SIZE)
+      
+      const processedBatch = batch.map(channel => {
+        const channelStreams = streams.filter(stream => stream.channel === channel.id)
+        const channelFeeds = feeds.filter(feed => feed.channel === channel.id)
+        
+        return {
+          ...channel,
+          streams: channelStreams,
+          feeds: channelFeeds
+        }
+      }).filter(channel => channel.streams.length > 0)
+
+      allChannels.push(...processedBatch)
+      
+      if (onProgress) {
+        const progress = Math.min(100, Math.round(((i + BATCH_SIZE) / totalChannels) * 100))
+        onProgress([...allChannels], progress)
+      }
+
+      await new Promise(resolve => setTimeout(resolve, 0))
+    }
+
+    return allChannels
+  } catch (error) {
+    console.error('Error fetching channels progressively:', error)
+    throw new Error('Failed to fetch channels')
+  }
+}
+
 export const searchChannels = async (
   channels: ChannelWithStream[], 
   filters: FilterOptions
